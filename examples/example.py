@@ -370,7 +370,7 @@ def parse_args():
     parser.add_argument(
         "--model-id",
         type=str,
-        default="",
+        default="deepseek-ai/deepseek-vl2-tiny",
         help="HF Model ID",
     )
     parser.add_argument(
