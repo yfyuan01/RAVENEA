@@ -8,7 +8,12 @@
   <img src="assets/ravenea_logo.png" width="150"/>
 </p>
 
+## Overview
 We introduce RAVENEA, a large-scale benchmark comprising over 10,000 human-ranked Wikipedia documents tailored for culture-aware vision-language understanding. The dataset spans eight countries and eleven diverse topical categories, and includes more than 1,800 culturally grounded images. Our experiments demonstrate that retrieval-based cultural augmentation improves performance of lightweight vision-language models by 3.2% on culture-aware VQA (cVQA) and 6.2% on culture-aware image captioning (cIC), underscoring the importance of RAG in cultural context in multimodal learning.
+<p align="center">
+  <img src="assets/ravenea.png"/>
+</p>
+
 
 ## Getting Started
 ### Installation
@@ -52,8 +57,9 @@ python ./example/example.py --model-type deepseek_vl_v2 --model-id deepseek-ai/d
     --retrieval-file ./models/baselines/clip-vit-large-patch14.csv
 ```
 
+
 ## Citation
-If you find Tevatron helpful, please consider citing our [paper](https://arxiv.org/abs/2505.14462).
+If you find RAVENEA helpful, please consider citing our [paper](https://arxiv.org/abs/2505.14462).
 ```bibtex
 @misc{li2025raveneabenchmarkmultimodalretrievalaugmented,
       title={RAVENEA: A Benchmark for Multimodal Retrieval-Augmented Visual Culture Understanding}, 
