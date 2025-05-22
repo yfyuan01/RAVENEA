@@ -1,0 +1,14 @@
+datasets==3.5.0
+rich==14.0.0
+evaluate==0.4.3
+numpy==2.2.6
+pandas==2.2.3
+pycocoevalcap==1.2
+python-dotenv==1.1.0
+rich==14.0.0
+torch==2.6.0
+torchmetrics==1.7.1
+torchvision==0.21.0
+tqdm==4.67.1
+transformers==4.52.0.dev0
+vllm==0.8.3

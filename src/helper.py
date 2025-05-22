@@ -1,6 +1,7 @@
 import random
 import re
 from functools import partial
+from logging import getLogger
 
 import numpy as np
 import pandas as pd
@@ -9,6 +10,8 @@ import tqdm
 from evaluate import load
 from torchmetrics.functional.multimodal import clip_score
 from torchvision import transforms
+
+logger = getLogger(__name__)
 
 
 def set_seed(seed=42):
@@ -34,15 +37,11 @@ def calculate_precision(qrels, run_scores, k=5):
     for qid in run_scores:
         if qid not in qrels:
             continue
-        # max_rel = max(qrels[qid].values())
         max_rel = max(rel[1] for rel in qrels[qid].values())
         # Sort documents by score in descending order
         ranked_docs = sorted(run_scores[qid].items(), key=lambda x: x[1], reverse=True)[:k]
         relevant = sum(
-            1
-            for doc_id, _ in ranked_docs
-            # if doc_id in qrels[qid] and qrels[qid][doc_id] > 0
-            if doc_id in qrels[qid] and qrels[qid][doc_id][1] == max_rel and max_rel > 0
+            1 for doc_id, _ in ranked_docs if doc_id in qrels[qid] and qrels[qid][doc_id][1] == max_rel and max_rel > 0
         )
         scores.append(relevant / k if k > 0 else 0)
     return scores
@@ -69,16 +68,15 @@ def calculate_ndcg(qrels, run_scores, k=5):
         if qid not in qrels:
             continue
         # Sort documents by score in descending order
+        max_rel = max(rel[1] for rel in qrels[qid].values())
         ranked_docs = sorted(run_scores[qid].items(), key=lambda x: x[1], reverse=True)[:k]
         dcg = sum(
-            (2 ** (qrels[qid][doc_id][1] + 3) - 1) / np.log2(rank + 2)
+            (2 ** (qrels[qid][doc_id][1] + max_rel) - 1) / np.log2(rank + 2)
             for rank, (doc_id, _) in enumerate(ranked_docs)
-            # if doc_id in qrels[qid] and qrels[qid][doc_id] > 0
         )
         idcg = sum(
-            (2 ** (rel + 3) - 1) / np.log2(rank + 2)
+            (2 ** (rel + max_rel) - 1) / np.log2(rank + 2)
             for rank, rel in enumerate(sorted([rel[1] for rel in qrels[qid].values()], reverse=True)[:k])
-            # if rel > 0
         )
         scores.append(dcg / idcg if idcg > 0 else 0)
     return scores
@@ -122,11 +120,6 @@ def region_score(pred_captions, gt_captions, country_info, region=None):
         # Check if country name or adjective appears in captions
         pred_count += int(any(term.lower() in pred_captions[idx].lower() for term in candidates))
         gt_count += int(any(term.lower() in gt_captions[idx].lower() for term in candidates))
-        # if country_name.lower() in gt_captions[idx].lower() or country_adjective.lower() in gt_captions[idx].lower():
-        #     gt_count += 1
-        # else:
-        #     debug.append((idx, country_name, country_adjective, gt_captions[idx]))
-
     total = len(country_info)
     return {
         f"gt_region_score-{region}": gt_count / total if total > 0 else 0,
@@ -183,23 +176,11 @@ def calculate_bert_score(pred_captions, gt_captions, country=None):
         predictions=pred_captions, references=gt_captions, lang="en", model_type="bert-base-uncased"
     )
     results = {
-        f"precision-{country}": np.mean(results["precision"]),
-        f"recall-{country}": np.mean(results["recall"]),
-        f"f1-{country}": np.mean(results["f1"]),
+        f"precision-{country}": np.mean(results["precision"]),  # type: ignore
+        f"recall-{country}": np.mean(results["recall"]),  # type: ignore
+        f"f1-{country}": np.mean(results["f1"]),  # type: ignore
     }
     return results
-
-
-def get_doc_content(doc_path):
-    docs = {}
-    file = pd.read_csv(doc_path, sep="\t", header=None)
-    for line in tqdm.tqdm(file.iterrows(), desc="loading datafile (by line)", leave=False):
-        cols = line[1].tolist()
-        c_type, c_id, c_text = cols
-        assert c_type == "doc"
-        keep_docs = c_text.replace("\n", " ").split(" ")[0:256]
-        docs[c_id] = " ".join(keep_docs).rsplit(". ", 1)[0] + "."
-    return docs
 
 
 def get_retriever_docs(file_path):
@@ -243,3 +224,81 @@ def is_match(predicted, ground_truth):
                 # If text is given, do a loose match (case-insensitive, trimmed)
                 return pred_text.strip().lower() == gt_text.strip().lower()
     return False
+
+
+def prepare_cvqa_input(args, data, wiki_data):
+    QUERY_TEMPLATE = """Answer the following multiple choice question. The last line of your response must be of the following format: 'Answer: $LETTER' (without quotes) where LETTER is one of ABCD. {Retrieval}\n\nQuestion:\n{Question}\n\n{A}\n{B}\n{C}\n{D}""".strip()
+    if not args.use_retrieval:
+        logger.info("Without retrieval")
+        texts = [
+            QUERY_TEMPLATE.format(
+                A=d["options"][idx][0].replace(". ", ") "),  # type: ignore
+                B=d["options"][idx][1].replace(". ", ") "),  # type: ignore
+                C=d["options"][idx][2].replace(". ", ") "),  # type: ignore
+                D=d["options"][idx][3].replace(". ", ") "),  # type: ignore
+                Question=d["questions"][idx],  # type: ignore
+                Retrieval="",
+            )
+            for d in data
+            for idx in range(len(d["questions"]))
+        ]
+    else:
+        retrieval_template = """The scope of the question is strictly limited to the given image. However, please analyze and incorporate information from both the image and the following document to answer the question.\n\nDocument:\n{Retrieval}"""
+        # Use retrieved docs
+        logger.info("using retrieval")
+        logger.info(args.retrieval_file)
+        retriever = get_retriever_docs(args.retrieval_file)
+        retrieval_docs = [
+            " ".join(f"{wiki_data[str(d_id)]}" for d_id in retriever[q_id][: args.top_k_retrieval])
+            for q_id, questions in zip(data["query_id"], data["questions"])
+            for _ in range(len(questions))
+        ]
+        retrieval_contents = [retrieval_template.format(Retrieval=d_doc.strip()) for d_doc in retrieval_docs]
+        texts = []
+        count = 0
+        for d in data:
+            for idx in range(len(d["questions"])):
+                texts.append(
+                    QUERY_TEMPLATE.format(
+                        A=d["options"][idx][0].replace(". ", ") "),  # type: ignore
+                        B=d["options"][idx][1].replace(". ", ") "),  # type: ignore
+                        C=d["options"][idx][2].replace(". ", ") "),  # type: ignore
+                        D=d["options"][idx][3].replace(". ", ") "),  # type: ignore
+                        Question=d["questions"][idx],  # type: ignore
+                        Retrieval=retrieval_contents[count],
+                    )
+                )
+                count += 1
+    return texts
+
+
+def prepare_cic_input(args, data, wiki_data):
+    QUERY_TEMPLATE = """Write a concise, one-sentence caption for the given image. The generated caption must contain the visual content and culturally relevant elements of the image. Avoid explicit references to the image itself (e.g., "This image shows...", "Pictured here is...", "In this photograph..."). Do not generate multiple options. {CONTEXT}""".strip()
+    # Input image and question
+    if not args.use_retrieval:
+        logger.info("Without retrieval")
+        texts = [
+            QUERY_TEMPLATE.format(
+                CONTEXT="",
+            ).strip()
+            for _ in data
+        ]
+    else:
+        retrieval_template = """Please consider the following context:\n{Retrieval}""".strip()
+        # Use retrieved docs
+        logger.info("using retrieval")
+        logger.info(args.retrieval_file)
+        retriever = get_retriever_docs(args.retrieval_file)
+        retrieval_docs = [
+            " ".join(f"{wiki_data[str(d_id)]}" for d_id in retriever[q_id][: args.top_k_retrieval])
+            for q_id in data["query_id"]
+        ]
+        retrieval_contents = [retrieval_template.format(Retrieval=d_doc.strip()) for d_doc in retrieval_docs]
+        texts = [
+            QUERY_TEMPLATE.format(
+                CONTEXT=retrieval_contents[doc_idx] + "\n",
+            )
+            for doc_idx, _ in enumerate(data)
+        ]
+
+    return texts

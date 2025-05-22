@@ -32,6 +32,8 @@ from src.helper import (
     calculate_clip_score,
     clean_caption,
     is_match,
+    prepare_cic_input,
+    prepare_cvqa_input,
     region_score,
 )
 
@@ -57,8 +59,6 @@ class ModelRequestData(NamedTuple):
 # Deepseek-VL2
 def run_deepseek_vl2(questions: list[str], modality: str, model_id: str) -> ModelRequestData:
     assert modality == "image"
-
-    # model_name = "deepseek-ai/deepseek-vl2-tiny"
     model_name = model_id
 
     engine_args = EngineArgs(
@@ -82,42 +82,7 @@ model_example_map = {
 }
 
 
-def prepare_cvqa_input(args, data):
-    QUERY_TEMPLATE = """Answer the following multiple choice question. The last line of your response must be of the following format: 'Answer: $LETTER' (without quotes) where LETTER is one of ABCD. {Retrieval}\n\nQuestion:\n{Question}\n\n{A}\n{B}\n{C}\n{D}""".strip()
-    if not args.use_retrieval:
-        logger.info("Without retrieval")
-        texts = [
-            QUERY_TEMPLATE.format(
-                A=d["options"][idx][0],  # type: ignore
-                B=d["options"][idx][1],  # type: ignore
-                C=d["options"][idx][2],  # type: ignore
-                D=d["options"][idx][3],  # type: ignore
-                Question=d["questions"][idx],  # type: ignore
-                Retrieval="",
-            )
-            for d in data
-            for idx in range(len(d["questions"]))
-        ]
-
-    return texts
-
-
-def prepare_cic_input(args, data):
-    QUERY_TEMPLATE = """Write a concise, one-sentence caption for the given image. The generated caption must contain the visual content and culturally relevant elements of the image. Avoid explicit references to the image itself (e.g., "This image shows...", "Pictured here is...", "In this photograph..."). Do not generate multiple options. {CONTEXT}""".strip()
-    # Input image and question
-    if not args.use_retrieval:
-        logger.info("Without retrieval")
-        texts = [
-            QUERY_TEMPLATE.format(
-                CONTEXT="",
-            ).strip()
-            for _ in data
-        ]
-
-    return texts
-
-
-def get_multi_modal_input(args, data):
+def get_multi_modal_input(args, data, wiki_data):
     """
     return {
         "data": image or video,
@@ -127,15 +92,20 @@ def get_multi_modal_input(args, data):
     if args.modality == "image":
         # Input image and question
         if args.task_type == "cVQA":
-            texts = prepare_cvqa_input(args, data)
+            texts = prepare_cvqa_input(args, data, wiki_data)
+            # since one image may have multiple question.
+            images = [d["image"] for d in data for _ in range(len(d["questions"]))]
+            query_ids = [d["query_id"] for d in data for _ in range(len(d["questions"]))]
         elif args.task_type == "cIC":
-            texts = prepare_cic_input(args, data)
+            texts = prepare_cic_input(args, data, wiki_data)
+            images = data["image"]
+            query_ids = data["query_id"]
         else:
             raise ValueError(f"Downstream task {args.task_type} is not supported.")
         return {
-            "data": data["image"],
+            "data": images,  # type: ignore
             "questions": texts,
-            "question_id": data["query_id"],
+            "query_ids": query_ids,  # type: ignore
         }
 
     msg = f"Modality {args.modality} is not supported."
@@ -183,11 +153,25 @@ def time_counter(enable: bool):
 
 def evaluate_multi_choice(args, prediction_file, data):
     preds = json.load(open(prediction_file))
-    gt = [j for i in data["answers"] for j in i]
+    count = 0
+    gt = {}
+    for item in data:
+        answers = item["answers"]
+        for i, (opts, answer) in enumerate(zip(item["options"], answers)):
+            key = f"{item['query_id']}_{count}"
+            # Use list comprehension with next for faster matching
+            for opt in opts:
+                if opt.startswith(answer):
+                    gt[key] = opt.replace(". ", ") ")
+                    break
+            count += 1
     correct = sum(is_match(preds.get(key, ""), gt[key]) for key in gt)
     total = len(gt)
-    logger.info(f"{args.model_type} with {args.top_k_retrieval} retrieval")
-    logger.info(args.retriever_result_path)
+    logger.info(f"{args.model_type} with {args.use_retrieval} retrieval")
+    if args.use_retrieval:
+        logger.info(f"Top {args.top_k_retrieval} retrieval from {args.retrieval_file}")
+    else:
+        logger.info("No retrieval")
     logger.info(f"Correct: {correct}/{total} ({correct / total:.4f})")
     logger.info("==" * 50)
     results = {"accuracy": correct / total}
@@ -204,7 +188,7 @@ def evaluate_caption(args, prediction_file, data):
     # all_countries = ["India", "Korea", "Nigeria", "Mexico", "China"]
     for curr_caption in gt:
         pred_caps[curr_caption["query_id"]] = [clean_caption(preds.get(curr_caption["query_id"], "")).strip()]
-        gt_caps[curr_caption["query_id"]] = [curr_caption["caption"]]
+        gt_caps[curr_caption["query_id"]] = [curr_caption["human_captions"]]
 
     # Initialize scorers
     bleu_scorer = Bleu(4)  # up to 4-grams
@@ -215,10 +199,10 @@ def evaluate_caption(args, prediction_file, data):
     bleu_score, _ = bleu_scorer.compute_score(gt_caps, pred_caps)
     rouge_score, _ = rouge_scorer.compute_score(gt_caps, pred_caps)
     cider_score, _ = cider_scorer.compute_score(gt_caps, pred_caps)
-    preds_captions = [pred_caps.get(curr_caption["ID"], "")[0] for curr_caption in gt]
-    clip_score = calculate_clip_score(gt["image"], gt_texts=gt["caption"], pred_texts=preds_captions, args=args)
-    region_appearance = region_score(preds_captions, gt["caption"], gt["ID"])
-    bert_scores = calculate_bert_score(preds_captions, gt["caption"])
+    preds_captions = [pred_caps.get(curr_caption["query_id"], "")[0] for curr_caption in gt]
+    clip_score = calculate_clip_score(gt["image"], gt_texts=gt["human_captions"], pred_texts=preds_captions, args=args)
+    region_appearance = region_score(preds_captions, gt["human_captions"], country_info=gt["img_id"])
+    bert_scores = calculate_bert_score(preds_captions, gt["human_captions"])
     results = {f"bleu-{i + 1}": score for i, score in enumerate(bleu_score)}
     results.update({"rouge": rouge_score, "cider": cider_score})
     results.update(clip_score)
@@ -227,7 +211,7 @@ def evaluate_caption(args, prediction_file, data):
     return results
 
 
-def run_model(args, retrieval_result, idx, llm, data):
+def run_model(args, data, wiki_data):
     model = args.model_type
     if model not in model_example_map:
         raise ValueError(f"Model type {model} is not supported.")
@@ -240,17 +224,18 @@ def run_model(args, retrieval_result, idx, llm, data):
         evaluate = evaluate_caption
     else:
         raise ValueError(f"Downstream task {args.task_type} is not supported.")
-
-    args.retriever_result_path = retrieval_result
-    retriever_name = Path(retrieval_result).stem
-    saving_file = Path(f"./outputs_{args.task_type}/{model_name}_results-{retriever_name}.json")
+    if args.use_retrieval:
+        retriever_name = Path(args.retrieval_file).stem
+        saving_file = Path(f"./outputs_{args.task_type}/{model_name}_results-{retriever_name}.json")
+    else:
+        saving_file = Path(f"./outputs_{args.task_type}/{model_name}_results-No Retrieval.json")
     if saving_file.exists():
         scores = evaluate(args, saving_file, data)
-        return llm, scores
+        return scores
 
     saving_file.parent.mkdir(parents=True, exist_ok=True)
-    mm_input = get_multi_modal_input(args, data)
-    data = mm_input["data"]
+    mm_input = get_multi_modal_input(args, data, wiki_data)
+    mm_data = mm_input["data"]
     questions = mm_input["questions"]
 
     req_data = model_example_map[model](questions, modality, args.model_id)
@@ -259,36 +244,35 @@ def run_model(args, retrieval_result, idx, llm, data):
 
     engine_args = asdict(req_data.engine_args) | {
         "seed": args.seed,
-        "gpu_memory_utilization": 0.95,
+        "gpu_memory_utilization": 0.9,
         "tensor_parallel_size": num_gpus,
         "disable_mm_preprocessor_cache": args.disable_mm_preprocessor_cache,
     }
 
     # Don't want to check the flag multiple times, so just hijack `prompts`.
     prompts = req_data.prompts if args.use_different_prompt_per_request else [req_data.prompts[0]]
-    if idx == 0:
-        print("Prompt example:")
-        print(prompts[0])
+    # if idx == 0:
+    print("Prompt example:")
+    print(prompts[0])
     # # greedy decoding
     sampling_params = SamplingParams(temperature=0, max_tokens=256, stop_token_ids=req_data.stop_token_ids)
 
     # Batch inference
     if args.image_repeat_prob is not None:
         # Repeat images with specified probability of "image_repeat_prob"
-        inputs = apply_image_repeat(args.image_repeat_prob, args.num_prompts, data, prompts, modality)
+        inputs = apply_image_repeat(args.image_repeat_prob, args.num_prompts, mm_data, prompts, modality)
     else:
         if args.num_prompts:
             prompts = prompts[: args.num_prompts]
         inputs = [
             {
                 "prompt": prompts[i],
-                "multi_modal_data": {modality: data[i]},
+                "multi_modal_data": {modality: mm_data[i]},
             }
             for i, _ in enumerate(prompts)
         ]
 
-    if llm is None:
-        llm = LLM(**engine_args)
+    llm = LLM(**engine_args)
 
     lora_request = req_data.lora_requests * len(prompts) if req_data.lora_requests else None
 
@@ -300,23 +284,30 @@ def run_model(args, retrieval_result, idx, llm, data):
     results = {}
     for idx, o in enumerate(outputs):
         generated_text = o.outputs[0].text
-        results[mm_input["question_id"][idx]] = generated_text
+        if args.task_type == "cVQA":
+            results[f"{mm_input['query_ids'][idx]}_{idx}"] = generated_text
+        else:
+            results[mm_input["query_ids"][idx]] = generated_text
     with open(saving_file, "w") as f:
         json.dump(results, f, indent=4)
     scores = evaluate(args, saving_file, data)
-    return llm, scores
+    return scores
 
 
 def main(args):
     # for no retrieval only now
-    retrieval_results = ["No Retrieval"]
     data = load_dataset("jaagli/ravenea", split="combination")
-    data = data.filter(lambda x: x["task_type"] == args.task_type, num_proc=8)
-
-    llm = None
-    for idx, retrieval_result in enumerate(retrieval_results):
-        llm, eval_scores = run_model(args, retrieval_result, idx, llm, data)
-        logging.info(eval_scores)
+    data = data.filter(lambda x: x["task_type"] == args.task_type, num_proc=8).select(range(10))  # type: ignore
+    wiki = load_dataset("wikipedia", "20220301.en", split="train")
+    required_wiki_ids = set([j for i in data["doc_ids"] for j in i])  # type: ignore
+    wiki = wiki.filter(lambda x: x["id"] in required_wiki_ids, num_proc=8)  # type: ignore
+    wiki_data = {}
+    for doc_id, doc in zip(wiki["id"], wiki["text"]):
+        doc = doc.replace("\n", " ").split(" ")[:256]  # type: ignore
+        doc = " ".join(doc).rsplit(". ", 1)[0] + "."
+        wiki_data[doc_id] = doc
+    eval_scores = run_model(args, data, wiki_data)
+    logging.info(eval_scores)
 
 
 def parse_args():
@@ -332,12 +323,15 @@ def parse_args():
         help='Huggingface "model_type".',
     )
     parser.add_argument(
-        "--num-prompts", type=int, default=0, help="Number of prompts to run. For debugging, 0 means all."
+        "--model-id",
+        type=str,
+        default="deepseek-ai/deepseek-vl2-tiny",
+        help="HF Model ID",
     )
     parser.add_argument(
-        "--modality", type=str, default="image", choices=["image", "video"], help="Modality of the input."
+        "--num-prompts", type=int, default=0, help="Number of prompts to run. For debugging, 0 means all."
     )
-    parser.add_argument("--num-frames", type=int, default=1, help="Number of frames to extract from the video.")
+    parser.add_argument("--modality", type=str, default="image", choices=["image"], help="Modality of the input.")
     parser.add_argument("--seed", type=int, default=1048576, help="Set the seed when initializing `vllm.LLM`.")
 
     parser.add_argument(
@@ -368,22 +362,29 @@ def parse_args():
         help="If True, then use retrieval for the model.",
     )
     parser.add_argument(
-        "--model-id",
-        type=str,
-        default="deepseek-ai/deepseek-vl2-tiny",
-        help="HF Model ID",
-    )
-    parser.add_argument(
         "--top-k-retrieval",
         type=int,
-        default=0,
+        default=1,
         help="Top k retrieval",
     )
     parser.add_argument(
-        "--task_type",
+        "--task-type",
         type=str,
         default="cVQA",
         help="cVQA or cIC",
+    )
+
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="jaagli/ravenea",
+        help="Dataset to use for evaluation.",
+    )
+    parser.add_argument(
+        "--retrieval-file",
+        type=str,
+        default="./models/baselines/clip-vit-large-patch14.csv",
+        help="Path to the retrieval result file.",
     )
 
     return parser.parse_args()
