@@ -53,7 +53,6 @@ def compute_caption_metrics(pred_caps, gt_caps, pred_list, gt_list, image_list, 
     image_list: list of image paths (aligned)
     country: specific country name or None
     """
-    # bleu_scorer = Bleu(4)
     rouge_scorer = Rouge()
     cider_scorer = Cider()
     
@@ -61,17 +60,14 @@ def compute_caption_metrics(pred_caps, gt_caps, pred_list, gt_list, image_list, 
     
     # Standard COCO metrics
     if pred_caps and gt_caps:
-        # bleu_score, _ = bleu_scorer.compute_score(gt_caps, pred_caps)
         rouge_score, _ = rouge_scorer.compute_score(gt_caps, pred_caps)
         cider_score, _ = cider_scorer.compute_score(gt_caps, pred_caps)
         
         prefix = f"{country}-" if country else ""
         results.update({
-            # f"{prefix}bleu-4": round(bleu_score[3]*100, 1),
             f"{prefix}rouge": round(rouge_score*100, 1),
             f"{prefix}cider": round(cider_score*100, 1)
         })
-    # breakpoint()
     # CLIP Score
     clip_scores = calculate_clip_score(image_list, gt_list, pred_list, country=country)
     results.update(clip_scores)
@@ -165,16 +161,10 @@ if __name__ == "__main__":
         predictions = json.load(f)
     logger.info("==" * 50)
     logger.info(f"Loaded {len(predictions)} predictions from {args.predictions}")
-
-    # Determine if CVQA or Captioning based on data content path or implicit knowledge
-    # The user request specifically mentioned evaluating captions in one file and it implies we might need to check.
-    # But usually one script handles one task or detects it.
-    # We can check simple heuristic: if "cvqa" in args.data
     
     if "cvqa" in args.data.lower():
         data = load_cvqa_data(args.data)
         evaluate_cvqa(predictions, data)
     else:
-        # Assume Caption (CIC)
         data = load_cic_data(args.data)
         evaluate_cic(predictions, data)

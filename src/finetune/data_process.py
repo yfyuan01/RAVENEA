@@ -159,16 +159,12 @@ class CustomDataset(Dataset):
         # unique query_id is tricky. Use file_name as query_id
         query_id = sample.get("file_name", str(idx))
         
-        # Construct labels for loss function: 1 if x > 0 else 0
-        # labels_list = [1 if x > 0 else 0 for x in culture_relevance]
-
         return {
             "input_ids": input_ids,
             "pixel_values": pixel_values,
             "query_id": query_id,
             "img_id": sample.get("img_id", query_id),
             "doc_ids": all_doc_ids,
-            # "labels": labels_list,
             "relevance_scores": culture_relevance,
             "is_training": True if self.split == "train" else False
         }
@@ -185,11 +181,8 @@ class CustomDataCollator:
                 "query_id": [f["query_id"] for f in features],
                 "img_id": [f["img_id"] for f in features],
                 "doc_ids": [f["doc_ids"] for f in features],
-                # "labels": torch.tensor([f["labels"] for f in features], dtype=torch.long),
             }
 
-            # Only add relevance_scores to batch if they exist in all features
-            # if all("relevance_scores" in f for f in features):
             batch_relevance = torch.tensor([f["relevance_scores"] for f in features], dtype=torch.long)
             min_val, max_val = -3, 3
             new_min, new_max = -1, 1
@@ -200,8 +193,6 @@ class CustomDataCollator:
             # 1. Collect unique documents and their tensors
             doc_id_to_tensor = {}
             for f in features:
-                # f["input_ids"] is expected to be (N_docs, SeqLen)
-                # f["doc_ids"] is list of doc_ids corresponding to rows of input_ids
                 current_input_ids = f["input_ids"]
                 current_doc_ids = f["doc_ids"]
                 
@@ -218,22 +209,10 @@ class CustomDataCollator:
             batch_size = len(features)
             num_unique_docs = len(unique_doc_ids)
             
-            # batch_labels = torch.zeros((batch_size, num_unique_docs), dtype=torch.long)
-            
-            # has_relevance_scores = all("relevance_scores" in f for f in features)
-            # if has_relevance_scores:
             batch_relevance = torch.zeros((batch_size, num_unique_docs), dtype=torch.long)-3
             
             for i, f in enumerate(features):
                 current_doc_ids = f["doc_ids"]
-                # current_labels = f["labels"]
-                
-                # for doc_id, label in zip(current_doc_ids, current_labels):
-                #     if doc_id in doc_id_to_idx:
-                #         idx = doc_id_to_idx[doc_id]
-                #         batch_labels[i, idx] = label
-                
-                # if has_relevance_scores:
                 current_scores = f["relevance_scores"]
                 for doc_id, score in zip(current_doc_ids, current_scores):
                     if doc_id in doc_id_to_idx:
@@ -252,17 +231,13 @@ class CustomDataCollator:
                 "query_id": [f["query_id"] for f in features],
                 "img_id": [f["img_id"] for f in features],
                 "doc_ids": unique_doc_ids, # Now a list of all unique doc IDs in the CACHE/BATCH
-                # "labels": batch_labels,
                 "relevance_scores": batch_relevance,
             }
             
             # Normalize relevance scores from [-3,3] to [-1, 1] to represent labels
-            # min_val, max_val = batch_relevance.min(), batch_relevance.max()
             min_val, max_val = -3, 3
             new_min, new_max = -1, 1
             batch["labels"] = (new_max - new_min) * (batch_relevance - min_val) / (max_val - min_val) + new_min
-            # batch["labels"][batch["labels"] == 0] = -0.2
-            # breakpoint()
             return batch
 
 

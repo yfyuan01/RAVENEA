@@ -41,7 +41,7 @@ def load_cvqa_data(data_path: str) -> List[Dict[str, Any]]:
                 example = {
                     'id': q_id,
                     'file_name': file_name,
-                    'image': file_name, # vLLM checks 'image' key if loaded directly, but here we pass path
+                    'image': file_name, 
                     'country': country,
                     'question': questions[i],
                     'options': options[i],
@@ -65,7 +65,7 @@ def load_cic_data(data_path: str) -> List[Dict[str, Any]]:
             example = {
                 'id': file_name,
                 'file_name': file_name,
-                'image': file_name, # vLLM checks 'image' key if loaded directly, but here we pass path
+                'image': file_name,
                 'country': country,
                 'human_caption': human_caption,
             }
@@ -82,11 +82,7 @@ def load_documents(doc_path: str) -> Dict[str, str]:
             item = json.loads(line)
             # Use 'id' from jsonl as key (e.g., 'enwiki/123')
             doc_content = re.sub(r'(?m)^#+\s.*$', '', item['text']).strip()
-            # Original code logic: split by space and take first 256 words
             final_content = " ".join(doc_content.split()[:256]).rsplit(". ", 1)[0] + "."
-            # first paragraph
-            # final_content = " ".join(doc_content.split("\n\n"))[0]
-            # final_content = doc_content
             docs[item['id']] = final_content
     return docs
 
@@ -95,19 +91,16 @@ def load_retrieval_run(run_path: str) -> Dict[str, List[str]]:
     Loads TREC run file. Returns {qid: [docid1, docid2, ...]}
     """
     result = defaultdict(list)
-    # Using pandas similar to original code but adapted for no header
-    # Format: qid Q0 docid rank score runtag
     try:
-        df = pd.read_csv(run_path, sep='\t', header=None, quoting=3) # quoting=3 (QUOTE_NONE) helps with some weird lines
+        df = pd.read_csv(run_path, sep='\t', header=None, quoting=3)
         for _, row in df.iterrows():
             if len(row) < 3: 
-                continue # Skip malformed
+                continue
             qid = str(row[0])
             docid = str(row[2])
             result[qid].append(docid)
     except Exception as e:
         logger.error(f"Error loading run file: {e}")
-        # Fallback to manual reading if pandas fails on weird separators
         with open(run_path, 'r') as f:
             for line in f:
                 parts = line.strip().split('\t')
@@ -250,16 +243,14 @@ def region_score(pred_captions: List[str], gt_captions: List[str], country_info:
     pred_count, gt_count = 0, 0
     total = 0
     for idx, country in enumerate(country_info):
-        # country is the country name from the dataset (e.g. "China")
         if region is not None and country != region:
             continue
             
         total += 1
-        country_name = country.split("_")[0] # Just in case data is dirty, though typically it's just "China"
+        country_name = country.split("_")[0]
         country_adjectives = country_dict.get(country_name, [])
         candidates = country_adjectives + [country_name]
         
-        # Check if country name or adjective appears in captions
         pred_text = pred_captions[idx].lower()
         gt_text = gt_captions[idx].lower()
         
@@ -267,7 +258,6 @@ def region_score(pred_captions: List[str], gt_captions: List[str], country_info:
         gt_count += int(any(term.lower() in gt_text for term in candidates))
 
     return {
-        # f"gt_region_score-{region if region else 'all'}": gt_count / total if total > 0 else 0,
         f"pred_region_score-{region if region else 'all'}": round(pred_count / total*100, 1) if total > 0 else 0.0,
     }
 

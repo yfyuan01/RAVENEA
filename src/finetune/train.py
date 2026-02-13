@@ -69,7 +69,7 @@ class TrainingArguments(TrainingArguments):
     Subclass of TrainingArguments to set defaults requested by user.
     """
     output_dir: str = field(
-        default="./models/culture",
+        default="./models/ravenea",
         metadata={"help": "The output directory where the model predictions and checkpoints will be written."}
     )
     num_train_epochs: float = field(
@@ -138,7 +138,7 @@ def main():
     torch.manual_seed(training_args.seed)
 
     model_name = model_args.hf_ckpt.split("/")[-1]
-    training_args.output_dir = training_args.output_dir + "_" + model_name
+    training_args.output_dir = training_args.output_dir + "-" + model_name
     model, processor = load_model(model_args.hf_ckpt)
     
     # freeze the vision encoder

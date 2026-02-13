@@ -37,7 +37,7 @@ def run_inference(model, processor, model_name, queries, doc_id_to_text, output_
         try:
             image = Image.open(image_path).convert("RGB")
         except Exception as e:
-            # print(f"Could not load image {image_path}: {e}")
+            print(f"Could not load image {image_path}: {e}")
             continue
 
         # Get candidates
@@ -114,12 +114,7 @@ if __name__ == "__main__":
     model_id = args.model_id
     print(f"Loading model: {model_id}")
     try:
-        # if "culture" not in model_id:
         model = AutoModel.from_pretrained(model_id, dtype=torch.float32, attn_implementation="sdpa")
-        # elif "clip" in model_id:
-        #     model = LocalCLIPModel.from_pretrained(model_id, dtype=torch.float32, attn_implementation="sdpa")
-        # elif "siglip" in model_id:
-        #     model = LocalSiglipModel.from_pretrained(model_id, dtype=torch.float32, attn_implementation="sdpa")
         processor = AutoProcessor.from_pretrained(model_id, use_fast=True)
         model_name = model_id.split("/")[-1]
         run_inference(model, processor, model_name, queries, doc_id_to_text, output_path)

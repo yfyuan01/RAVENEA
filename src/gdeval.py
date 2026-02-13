@@ -24,16 +24,6 @@ def read_gt(gt_file):
 
             for doc_id, relevance in zip(enwiki_ids, culture_relevance):
                 gt[query_id][doc_id] = int(relevance)
-        # else:
-        #     for line in file:
-        #         parts = line.strip().split()
-        #         if len(parts) < 4:
-        #             print(parts)
-        #             continue
-        #         query_id, _, doc_id, relevance = parts
-        #         if query_id not in gt:
-        #             gt[query_id] = {}
-        #         gt[query_id][doc_id] = int(relevance)
     return gt
 
 
@@ -130,9 +120,6 @@ def compute_metrics(gt, preds, max_judgement, depth=5):
         err_score = err(relevance_list, max_judgement, depth)
         prec_at_k = precision_at_k(ranked_docs, gt[query_id], depth)
         seperate_results.append((query_id, ndcg_score, err_score, prec_at_k))
-        # print(
-        #     f"Query ID: {query_id} | NDCG@{depth}: {ndcg_score} | ERR@{depth}: {err_score} | Precision@{depth}: {prec_at_k}"
-        # )
     return seperate_results
 
 
@@ -154,7 +141,6 @@ def retrieval_eval(gt_file, preds_file):
         ndcg_at_k.append(avg_ndcg)
         err_at_k.append(avg_err_score)
 
-        # print(f"Mean NDCG@{k}: {avg_ndcg} | Mean ERR@{k}: {avg_err_score} | Mean Precision@{k}: {avg_prec_at_k}")
     mrr_score = mean_reciprocal_rank(preds, gt)
     results = {
         "MRR": mrr_score,

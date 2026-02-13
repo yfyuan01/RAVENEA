@@ -58,8 +58,8 @@ ravenea/
 All models are available in our [HuggingFace collection](https://huggingface.co/collections/jaagli/ravenea): 
 | Model | Hugging Face Repo |
 | :--- | :--- |
-| Culture-CLIP | `jaagli/culture-clip-vit-large-patch14` ⭐ |
-| Culture-SigLIP2 | `jaagli/culture-siglip2-so400m-patch14-384` |
+| RAVENEA-CLIP | `jaagli/ravenea-clip-vit-large-patch14` ⭐ |
+| RAVENEA-SigLIP2 | `jaagli/ravenea-siglip2-so400m-patch14-384` |
 
 ⭐: Recommended
 
@@ -81,7 +81,7 @@ source .venv/bin/activate
 
 ### Inference
 ```bash
-python3 ./src/inference.py --model_id jaagli/culture-clip-vit-large-patch14
+python3 ./src/inference.py --model_id jaagli/ravenea-clip-vit-large-patch14
 ```
 This will:
 - Load the test queries and Wikipedia documents
@@ -119,7 +119,7 @@ python ./src/downstream_cic.py \
     --doc-path ./ravenea/wiki_documents.jsonl \
     --top-k-retrieval 1 \
     --task-path ./ravenea/cic_downstream.jsonl \
-    --retrieval-result-path  ./ret_outputs/culture-clip-vit-large-patch14.run \
+    --retrieval-result-path  ./ret_outputs/ravenea-clip-vit-large-patch14.run \
     --tensor-parallel-size 1
 ```
 
