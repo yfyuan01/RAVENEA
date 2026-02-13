@@ -60,6 +60,7 @@ All models are available in our [HuggingFace collection](https://huggingface.co/
 | :--- | :--- |
 | Culture-CLIP | `jaagli/culture-clip-vit-large-patch14` ⭐ |
 | Culture-SigLIP2 | `jaagli/culture-siglip2-so400m-patch14-384` |
+
 ⭐: Recommended
 
 ## 🚀 Quick Start
@@ -70,6 +71,8 @@ All models are available in our [HuggingFace collection](https://huggingface.co/
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Sync dependencies and create virtual environment
+git clone https://github.com/yfyuan01/RAVENEA.git
+cd RAVENEA
 uv sync
 
 # Activate the virtual environment
@@ -143,6 +146,7 @@ RAVENEA supports a diverse range of VLMs across various scales and architectures
 
 ```
 RAVENEA/
+├── ravenea/                  # Dataset directory
 ├── src/
 │   ├── baseline.py           # Baseline model evaluation
 │   ├── downstream_cic.py     # cIC task
@@ -157,9 +161,10 @@ RAVENEA/
 │       ├── inference.py      # Inference utilities
 │       ├── localclip.py      # CLIP fine-tuning
 │       └── localsiglip.py    # SigLIP2 fine-tuning
-├── ravenea/                  # Dataset directory
 ├── pyproject.toml            # Project dependencies
-└── README.md                 # This file
+├── README.md                 # This file
+├── uv.lock                   # Lock file
+└── ...
 ```
 
 ## 📝 Citation
