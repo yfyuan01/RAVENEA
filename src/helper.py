@@ -1,304 +1,304 @@
-import random
-import re
-from functools import partial
-from logging import getLogger
-
-import numpy as np
+import json
+from typing import List, Dict, Any
 import pandas as pd
+import re
+from collections import defaultdict
+import logging
+from transformers import AutoModel, AutoProcessor
 import torch
-import tqdm
+from PIL import Image
 from evaluate import load
-from torchmetrics.functional.multimodal import clip_score
-from torchvision import transforms
+import numpy as np
+import os
 
-logger = getLogger(__name__)
+logger = logging.getLogger(__name__)
+device = "cuda" if torch.cuda.is_available() else "cpu"
+torch.set_float32_matmul_precision("high")
 
+def load_cvqa_data(data_path: str) -> List[Dict[str, Any]]:
+    """
+    Loads CVQA data from JSONL and flattens it so each question is an example.
+    """
+    data = []
+    with open(data_path, 'r') as f:
+        for line in f:
+            item = json.loads(line)
+            file_name = item['file_name']
+            country = item.get('country', 'Unknown')
+            questions = item['questions']
+            options = item['options']
+            answers = item['answers']
+            
+            # Identify if options/questions/answers are aligned
+            # The provided schema seems to have list of questions and list of options lists
+            # We assume len(questions) == len(options) == len(answers)
+            
+            for i in range(len(questions)):
+                # key for retrieval is file_name
+                # unique id for this question example
+                q_id = f"{file_name}_{i}"
+                
+                example = {
+                    'id': q_id,
+                    'file_name': file_name,
+                    'image': file_name, # vLLM checks 'image' key if loaded directly, but here we pass path
+                    'country': country,
+                    'question': questions[i],
+                    'options': options[i],
+                    'answer': answers[i]
+                }
+                data.append(example)
+    return data
 
-def set_seed(seed=42):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
+def load_cic_data(data_path: str) -> List[Dict[str, Any]]:
+    """
+    Loads CIC data from JSONL and flattens it so each question is an example.
+    """
+    data = []
+    with open(data_path, 'r') as f:
+        for line in f:
+            item = json.loads(line)
+            file_name = item['file_name']
+            country = item.get('country', 'Unknown')
+            human_caption = item['human_captions']
+            
+            example = {
+                'id': file_name,
+                'file_name': file_name,
+                'image': file_name, # vLLM checks 'image' key if loaded directly, but here we pass path
+                'country': country,
+                'human_caption': human_caption,
+            }
+            data.append(example)
+    return data
 
+def load_documents(doc_path: str) -> Dict[str, str]:
+    """
+    Loads documents from JSONL. Returns dict {id: text}.
+    """
+    docs = {}
+    with open(doc_path, 'r') as f:
+        for line in f:
+            item = json.loads(line)
+            # Use 'id' from jsonl as key (e.g., 'enwiki/123')
+            doc_content = re.sub(r'(?m)^#+\s.*$', '', item['text']).strip()
+            # Original code logic: split by space and take first 256 words
+            final_content = " ".join(doc_content.split()[:256]).rsplit(". ", 1)[0] + "."
+            # first paragraph
+            # final_content = " ".join(doc_content.split("\n\n"))[0]
+            # final_content = doc_content
+            docs[item['id']] = final_content
+    return docs
 
-def read_qrels_dict(file):
-    result = {}
-    for line in tqdm.tqdm(file, desc="loading qrels (by line)", leave=False):
-        qid, _, docid, bm25_score, relevance_score = line.split()
-        result.setdefault(qid, {})[docid] = float(bm25_score), int(float(relevance_score))
+def load_retrieval_run(run_path: str) -> Dict[str, List[str]]:
+    """
+    Loads TREC run file. Returns {qid: [docid1, docid2, ...]}
+    """
+    result = defaultdict(list)
+    # Using pandas similar to original code but adapted for no header
+    # Format: qid Q0 docid rank score runtag
+    try:
+        df = pd.read_csv(run_path, sep='\t', header=None, quoting=3) # quoting=3 (QUOTE_NONE) helps with some weird lines
+        for _, row in df.iterrows():
+            if len(row) < 3: 
+                continue # Skip malformed
+            qid = str(row[0])
+            docid = str(row[2])
+            result[qid].append(docid)
+    except Exception as e:
+        logger.error(f"Error loading run file: {e}")
+        # Fallback to manual reading if pandas fails on weird separators
+        with open(run_path, 'r') as f:
+            for line in f:
+                parts = line.strip().split('\t')
+                if len(parts) >= 3:
+                    result[parts[0]].append(parts[2])
     return result
 
+def is_match(predicted: str, ground_truth: str) -> bool:
+    """
+    Checks if predicted answer matches ground truth.
+    Ground truth is expected to be a letter (A, B, C, D) or "A) ...".
+    Prediction is expected to contain "Answer: X" or start with "X)".
+    """
+    # Check for answer pattern in one of two formats:
+    # 1. "Answer: A" or "Answer: A) text" anywhere in the string
+    # 2. "A)" or "A) text" at the beginning of the string
+    # 3. Only one character "A", "B", "C", or "D" at the beginning of the string
+    match = re.search(r"Answer:\s*([A-D])(?:\s*\)\s*(.*)?)?", predicted)
+    
+    if match is None:
+        # Look for option pattern at beginning of string
+        match = re.search(r"^([A-D])\s*\)\s*(.*)", predicted)
 
-def calculate_precision(qrels, run_scores, k=5):
+    if match or len(predicted.strip()) == 1:
+        pred_option = match.group(1) if match else predicted.strip()
+        
+        # Ground truth usually is just "A" or "A", but handle "A) ..."
+        gt_match = re.search(r"^([A-D])(?:\)|\s|$)", ground_truth)
+        gt_option = gt_match.group(1) if gt_match else ground_truth.strip()
+        
+        return pred_option == gt_option
+
+    return False
+
+
+def calculate_clip_score(imgs: List[str], gt_texts: List[str], pred_texts: List[str], country: str = None) -> Dict[str, float]:
+    """
+    Calculates CLIP score for predicted captions using Hugging Face Transformers.
+    imgs: List of image paths.
+    """
+    model_name = "openai/clip-vit-base-patch16"
+    
+    # Check if we have 0 samples
+    if not imgs or not pred_texts:
+        return {f"pred_clip_score-{country if country else 'all'}": 0.0}
+
+    # Load model & processor
+    # We load them each time to allow for easy state reset, but for efficiency in a script called once it's fine.
+    model = AutoModel.from_pretrained(model_name, dtype=torch.bfloat16).to(device)
+    processor = AutoProcessor.from_pretrained(model_name, use_fast=True)
+
+    model.eval()
+    
+    # Process in batches to avoid OOM
+    batch_size = 32
     scores = []
-    for qid in run_scores:
-        if qid not in qrels:
+    
+    # Need to filter valid image/text pairs first to maintain alignment
+    valid_pairs = []
+    for img_path, text in zip(imgs, pred_texts):
+        if os.path.exists(img_path):
+             valid_pairs.append((img_path, text))
+        else:
+             logger.warning(f"Image not found: {img_path}")
+    
+    if not valid_pairs:
+        return {f"pred_clip_score-{country if country else 'all'}": 0.0}
+        
+    for i in range(0, len(valid_pairs), batch_size):
+        batch = valid_pairs[i:i+batch_size]
+        batch_paths = [p[0] for p in batch]
+        batch_texts = [p[1] for p in batch]
+        
+        # Load images
+        batch_images = []
+        final_batch_texts = [] # in case image open fails
+        
+        for path, text in zip(batch_paths, batch_texts):
+            try:
+                image = Image.open(path).convert("RGB")
+                batch_images.append(image)
+                final_batch_texts.append(text)
+            except Exception as e:
+                logger.warning(f"Failed to open image {path}: {e}")
+                continue
+        
+        if not batch_images:
             continue
-        max_rel = max(rel[1] for rel in qrels[qid].values())
-        # Sort documents by score in descending order
-        ranked_docs = sorted(run_scores[qid].items(), key=lambda x: x[1], reverse=True)[:k]
-        relevant = sum(
-            1 for doc_id, _ in ranked_docs if doc_id in qrels[qid] and qrels[qid][doc_id][1] == max_rel and max_rel > 0
-        )
-        scores.append(relevant / k if k > 0 else 0)
-    return scores
+            
+        try:
+            inputs = processor(
+                text=final_batch_texts, 
+                images=batch_images, 
+                return_tensors="pt", 
+                padding=True, 
+                truncation=True,
+                max_length=77
+            ).to(device)
+            
+            with torch.inference_mode():
+                with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                    # Get separate features
+                    image_features = model.get_image_features(pixel_values=inputs['pixel_values'])
+                    inputs.pop('pixel_values')
+                    text_features = model.get_text_features(**inputs)
+                
+                    # Normalize features
+                    image_features = image_features / image_features.norm(p=2, dim=-1, keepdim=True)
+                    text_features = text_features / text_features.norm(p=2, dim=-1, keepdim=True)
 
-
-def calculate_mrr(qrels, run_scores):
-    scores = []
-    for qid in run_scores:
-        if qid not in qrels:
+                    # Calculate cosine similarity
+                    score = 100 * (image_features * text_features).sum(axis=-1)
+                    scores.append(score.cpu())
+                
+        except Exception as e:
+            logger.error(f"Error during CLIP inference: {e}")
             continue
-        max_rel = max(rel[1] for rel in qrels[qid].values())
-        # Sort documents by score in descending order
-        ranked_docs = sorted(run_scores[qid].items(), key=lambda x: x[1], reverse=True)
-        for rank, (doc_id, _) in enumerate(ranked_docs, start=1):
-            if doc_id in qrels[qid] and qrels[qid][doc_id][1] == max_rel and max_rel > 0:
-                scores.append(1 / rank)
-                break
-    return sum(scores) / len(scores)
 
-
-def calculate_ndcg(qrels, run_scores, k=5):
-    scores = []
-    for qid in run_scores:
-        if qid not in qrels:
-            continue
-        # Sort documents by score in descending order
-        max_rel = max(rel[1] for rel in qrels[qid].values())
-        ranked_docs = sorted(run_scores[qid].items(), key=lambda x: x[1], reverse=True)[:k]
-        dcg = sum(
-            (2 ** (qrels[qid][doc_id][1] + max_rel) - 1) / np.log2(rank + 2)
-            for rank, (doc_id, _) in enumerate(ranked_docs)
-        )
-        idcg = sum(
-            (2 ** (rel + max_rel) - 1) / np.log2(rank + 2)
-            for rank, rel in enumerate(sorted([rel[1] for rel in qrels[qid].values()], reverse=True)[:k])
-        )
-        scores.append(dcg / idcg if idcg > 0 else 0)
-    return scores
-
-
-def calculate_clip_score(imgs, gt_texts, pred_texts, args, country=None):
-    clip_image_size = 224
-    with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-        clip_score_fn = partial(clip_score, model_name_or_path="openai/clip-vit-base-patch16")
-        pil_to_tensor = transforms.Compose(
-            [
-                transforms.Resize((clip_image_size, clip_image_size)),
-                transforms.ToTensor(),  # Converts to [0,1] float32 tensor
-            ]
-        )
-        # (B, C, H, W)
-        image_tensors = torch.stack([pil_to_tensor(img) for img in imgs]).to("cuda")
-        clip_score_value_pred = clip_score_fn(image_tensors, pred_texts).detach()
-        results = {f"pred_clip_score-{country}": clip_score_value_pred.cpu()}
-        if not args.use_retrieval:
-            clip_score_value_gt = clip_score_fn(image_tensors, gt_texts).detach()
-            results.update({f"gt_clip_score-{country}": clip_score_value_gt.cpu()})
+    if not scores:
+         return {f"pred_clip_score-{country if country else 'all'}": 0.0}
+    
+    all_scores = torch.cat(scores)
+    mean_score = all_scores.mean().item()
+    mean_score = max(0.0, mean_score)
+        
+    results = {f"pred_clip_score-{country if country else 'all'}": mean_score}
+        
     return results
 
 
-def region_score(pred_captions, gt_captions, country_info, region=None):
+def region_score(pred_captions: List[str], gt_captions: List[str], country_info: List[str], region: str = None) -> Dict[str, float]:
     country_dict = {
         "Nigeria": ["Nigerian"],
         "Korea": ["Korean", "Seoul"],
-        "China": ["Chinese", "Shanghai"],
+        "China": ["Chinese", "Shanghai", "Beijing"],
         "Mexico": ["Mexican"],
         "India": ["Indian"],
     }
 
     pred_count, gt_count = 0, 0
+    total = 0
     for idx, country in enumerate(country_info):
-        country_name = country.split("_")[0]
-        country_adjective = country_dict[country_name]
-        candidates = country_adjective + [country_name]
-
+        # country is the country name from the dataset (e.g. "China")
+        if region is not None and country != region:
+            continue
+            
+        total += 1
+        country_name = country.split("_")[0] # Just in case data is dirty, though typically it's just "China"
+        country_adjectives = country_dict.get(country_name, [])
+        candidates = country_adjectives + [country_name]
+        
         # Check if country name or adjective appears in captions
-        pred_count += int(any(term.lower() in pred_captions[idx].lower() for term in candidates))
-        gt_count += int(any(term.lower() in gt_captions[idx].lower() for term in candidates))
-    total = len(country_info)
+        pred_text = pred_captions[idx].lower()
+        gt_text = gt_captions[idx].lower()
+        
+        pred_count += int(any(term.lower() in pred_text for term in candidates))
+        gt_count += int(any(term.lower() in gt_text for term in candidates))
+
     return {
-        f"gt_region_score-{region}": gt_count / total if total > 0 else 0,
-        f"pred_region_score-{region}": pred_count / total if total > 0 else 0,
+        # f"gt_region_score-{region if region else 'all'}": gt_count / total if total > 0 else 0,
+        f"pred_region_score-{region if region else 'all'}": round(pred_count / total*100, 1) if total > 0 else 0.0,
+    }
+
+
+def calculate_bert_score(pred_captions: List[str], gt_captions: List[str], country: str = None) -> Dict[str, float]:
+    bertscore = load("bertscore")
+    with torch.inference_mode():
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            results = bertscore.compute(
+                predictions=pred_captions, references=gt_captions, lang="en", model_type="bert-base-uncased"
+            )
+    # results contains lists of precision, recall, f1
+    suffix = f"-{country}" if country else "-all"
+
+    return {
+        f"precision{suffix}": np.mean(results["precision"]),
+        f"recall{suffix}": np.mean(results["recall"]),
+        f"f1{suffix}": np.mean(results["f1"]),
     }
 
 
 def clean_caption(text):
-    """Extract the first caption from text using different patterns."""
-    # Define patterns to match different caption formats
-    patterns = [
-        # Option-style headings
-        r"\*\*Option 1.*?(?=Option|\Z)",
-        # Plain caption following an intro line
-        r":\s*\n\n(.+)",
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
-        if match:
-            # caption = match.group(1) if "(" in pattern else match.group()
-            caption = match.group()
-            caption = (
-                caption.split(":")[-1]
-                .strip()
-                .replace("*", "")
-                .replace("\u2019", "'")
-                .replace("\u2018", "'")
-                .replace("\u2013", "-")
-                .replace("\u201c", "")
-                .replace("\u201d", "")
-                .replace("\n", "")
-                .strip()
-                .split("  ")[0]
-            )
-
-            return caption
-
-    # Return original text if no patterns match
-    return (
-        text.replace("*", "")
-        .replace("\u2019", "'")
-        .replace("\u201c", "")
-        .replace("\u201d", "")
-        .replace("\u2013", "-")
-        .replace("\u2018", "'")
-        .strip()
-    )
-
-
-def calculate_bert_score(pred_captions, gt_captions, country=None):
-    bertscore = load("bertscore")
-    results = bertscore.compute(
-        predictions=pred_captions, references=gt_captions, lang="en", model_type="bert-base-uncased"
-    )
-    results = {
-        f"precision-{country}": np.mean(results["precision"]),  # type: ignore
-        f"recall-{country}": np.mean(results["recall"]),  # type: ignore
-        f"f1-{country}": np.mean(results["f1"]),  # type: ignore
-    }
-    return results
-
-
-def get_retriever_docs(file_path):
-    result = {}
-    file = pd.read_csv(file_path, sep="\t", header=None)
-    for line in tqdm.tqdm(file.iterrows(), desc="loading run (by line)", leave=False):
-        # cols = line[1][0].split()
-        if "bert" in file_path:
-            cols = line[1][0].split()
-        else:
-            cols = tuple(line[1].tolist())
-        qid, _, docid, rank, score, _ = cols
-        result.setdefault(qid, []).append(docid)
-    return result
-
-
-def is_match(predicted, ground_truth):
-    # Check for answer pattern in one of two formats:
-    # 1. "Answer: A" or "Answer: A) text" anywhere in the string
-    # 2. "A)" or "A) text" at the beginning of the string
-    match = re.search(r"Answer:\s*([A-D])(?:\s*\)\s*(.*)?)?", predicted)
-    if match is None:
-        # Look for option pattern at beginning of string
-        match = re.search(r"^([A-D])\s*\)\s*(.*)", predicted)
-
-    if match or len(predicted) == 1:
-        pred_option = match.group(1) if match else predicted.strip()
-        pred_text = match.group(2) if match else None
-
-        # Ground truth also starts with letter+text, e.g. "A) XXXX"
-        gt_match = re.search(r"([A-D])\)\s*(.*)", ground_truth)
-        if gt_match:
-            gt_option = gt_match.group(1)
-            gt_text = gt_match.group(2)
-
-            # First, check if options match
-            if pred_option == gt_option:
-                # If no text is given in prediction, it's still okay
-                if not pred_text:
-                    return True
-                # If text is given, do a loose match (case-insensitive, trimmed)
-                return pred_text.strip().lower() == gt_text.strip().lower()
-    return False
-
-
-def prepare_cvqa_input(args, data, wiki_data):
-    QUERY_TEMPLATE = """Answer the following multiple choice question. The last line of your response must be of the following format: 'Answer: $LETTER' (without quotes) where LETTER is one of ABCD. {Retrieval}\n\nQuestion:\n{Question}\n\n{A}\n{B}\n{C}\n{D}""".strip()
-    if not args.use_retrieval:
-        logger.info("Without retrieval")
-        texts = [
-            QUERY_TEMPLATE.format(
-                A=d["options"][idx][0].replace(". ", ") "),  # type: ignore
-                B=d["options"][idx][1].replace(". ", ") "),  # type: ignore
-                C=d["options"][idx][2].replace(". ", ") "),  # type: ignore
-                D=d["options"][idx][3].replace(". ", ") "),  # type: ignore
-                Question=d["questions"][idx],  # type: ignore
-                Retrieval="",
-            )
-            for d in data
-            for idx in range(len(d["questions"]))
-        ]
-    else:
-        retrieval_template = """The scope of the question is strictly limited to the given image. However, please analyze and incorporate information from both the image and the following document to answer the question.\n\nDocument:\n{Retrieval}"""
-        # Use retrieved docs
-        logger.info("using retrieval")
-        logger.info(args.retrieval_file)
-        retriever = get_retriever_docs(args.retrieval_file)
-        retrieval_docs = [
-            " ".join(f"{wiki_data[str(d_id)]}" for d_id in retriever[q_id][: args.top_k_retrieval])
-            for q_id, questions in zip(data["query_id"], data["questions"])
-            for _ in range(len(questions))
-        ]
-        retrieval_contents = [retrieval_template.format(Retrieval=d_doc.strip()) for d_doc in retrieval_docs]
-        texts = []
-        count = 0
-        for d in data:
-            for idx in range(len(d["questions"])):
-                texts.append(
-                    QUERY_TEMPLATE.format(
-                        A=d["options"][idx][0].replace(". ", ") "),  # type: ignore
-                        B=d["options"][idx][1].replace(". ", ") "),  # type: ignore
-                        C=d["options"][idx][2].replace(". ", ") "),  # type: ignore
-                        D=d["options"][idx][3].replace(". ", ") "),  # type: ignore
-                        Question=d["questions"][idx],  # type: ignore
-                        Retrieval=retrieval_contents[count],
-                    )
-                )
-                count += 1
-    return texts
-
-
-def prepare_cic_input(args, data, wiki_data):
-    QUERY_TEMPLATE = """Write a concise, one-sentence caption for the given image. The generated caption must contain the visual content and culturally relevant elements of the image. Avoid explicit references to the image itself (e.g., "This image shows...", "Pictured here is...", "In this photograph..."). Do not generate multiple options. {CONTEXT}""".strip()
-    # Input image and question
-    if not args.use_retrieval:
-        logger.info("Without retrieval")
-        texts = [
-            QUERY_TEMPLATE.format(
-                CONTEXT="",
-            ).strip()
-            for _ in data
-        ]
-    else:
-        retrieval_template = """Please consider the following context:\n{Retrieval}""".strip()
-        # Use retrieved docs
-        logger.info("using retrieval")
-        logger.info(args.retrieval_file)
-        retriever = get_retriever_docs(args.retrieval_file)
-        retrieval_docs = [
-            " ".join(f"{wiki_data[str(d_id)]}" for d_id in retriever[q_id][: args.top_k_retrieval])
-            for q_id in data["query_id"]
-        ]
-        retrieval_contents = [retrieval_template.format(Retrieval=d_doc.strip()) for d_doc in retrieval_docs]
-        texts = [
-            QUERY_TEMPLATE.format(
-                CONTEXT=retrieval_contents[doc_idx] + "\n",
-            )
-            for doc_idx, _ in enumerate(data)
-        ]
-
-    return texts
+    # Case 1: Multiple options - extract first option
+    match = re.search(r'\*\*Option 1.*?\*\*\n\n(.+?)(?=\n\n\*\*Option|\n\nI\'ve|$)', text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    
+    # Case 2: Single caption in quotes (after a colon or newline)
+    match = re.search(r'[:\n]\s*"(.+?)"(?:\s*$|\.?\s*$)', text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    
+    # Fallback: return the whole text if no pattern matches
+    return text.strip()
