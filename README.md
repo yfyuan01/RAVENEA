@@ -4,7 +4,7 @@
 <a><img src="assets/ravenea_logo.png" alt="RAVENEA" style="width: 40%; min-width: 300px; display: block; margin: auto;"></a>
 </p>
 
-### [**📃 Paper**](https://openreview.net/pdf?id=4zAbkxQ23i) | [**🤗 HuggingFace Dataset**](https://huggingface.co/datasets/ravenea)
+### [**📃 Paper**](https://openreview.net/pdf?id=4zAbkxQ23i) | [**🌐 Project Page**](https://jiaangli.github.io/ravenea/) | [**🤗 Dataset**](https://huggingface.co/datasets/ravenea) | [**🤗 Models**](https://huggingface.co/collections/jaagli/ravenea)
 
 This repository contains the official code and dataset for the paper "RAVENEA: A Benchmark for Multimodal Retrieval-Augmented Visual Culture Understanding".
 
